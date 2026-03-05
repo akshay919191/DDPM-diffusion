@@ -1,7 +1,7 @@
 import torch , math
 import torch.nn as nn
 import torch.nn.functional as F
-from selfattn import AttentionWrapper
+from models.selfattn import AttentionWrapper
 ## 
 class RESIDUAL(nn.Module):
     def __init__(self , inchannel , outchannel , timeinjectdim):
@@ -82,9 +82,9 @@ class UNET(nn.Module):
         self.bottleneck = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.SiLU(),
-            AttentionWrapper(256 , 8),
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.SiLU()
+            nn.SiLU(),
+            AttentionWrapper(256 , 8),
         )
 
         self.timeMLP3 = nn.Sequential(
@@ -140,19 +140,21 @@ class UNET(nn.Module):
 
         enc1 = self.enc1_conv(x) + time1_4d
         
-        pool1 = self.pool1(enc1)
+        #pool1 = self.pool1(enc1)
 
-        enc2 = self.enc2_conv(pool1) + time2_4d
-        pool2 = self.pool2(enc2)
+        enc2 = self.enc2_conv(enc1) + time2_4d
+        #pool2 = self.pool2(enc2)
 
-        bottleneck = self.bottleneck(pool2) + time3_4d
+        bottleneck = self.bottleneck(enc2) + time3_4d
 
         dec1 = self.up1(bottleneck) + time4_4d
-        dec1 = torch.cat([dec1 , enc2] , dim = 1)
+        dec1 = F.interpolate(dec1, size=enc2.shape[2:], mode='nearest')
+        dec1 = torch.cat([dec1, enc2], dim=1)
         dec1 = self.up1_conv(dec1)
 
         dec2 = self.up2(dec1) + time5_4d
-        dec2 = torch.cat([dec2 , enc1] , dim = 1)
+        dec2 = F.interpolate(dec2, size=enc1.shape[2:], mode='nearest')
+        dec2 = torch.cat([dec2, enc1], dim=1)
         dec2 = self.up2_conv(dec2)
 
         final = self.final(dec2) 
