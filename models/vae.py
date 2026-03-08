@@ -66,95 +66,111 @@ class VAE(nn.Module):
         return self.decode(z), mu, logvar
 
 
-def vae_loss(recon_logits, x, mu, logvar, kl_weight):
-    x_01  = (x + 1.0) * 0.5
-    recon = F.binary_cross_entropy_with_logits(
-                recon_logits, x_01, reduction='sum') / x.shape[0]
+def vae_loss(recon, x, mu, logvar, epoch):
+    mse  = F.mse_loss(recon, x)
+    ssim_loss = 1 - ssim(recon, x, data_range=1.0, size_average=True)
+    recon_loss = mse + 0.5 * ssim_loss
     
-    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.shape[0]
-    return recon + kl_weight * kl, recon, kl
+    kl_weight = min(epoch / 50, 1.0) * 0.00001
+    kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    
+    return recon_loss + kl_weight * kl, recon_loss, kl
 
 
 
 
 ## 
 class LatentVAE(nn.Module):
-    def __init__(self , latentdim , inchannel):
+    def __init__(self, latentdim, inchannel):
         super().__init__()
-        self.latent_dim = latentdim
-        self.inchannel = inchannel
         
-        self.enc1 = nn.Sequential(
-            nn.Conv2d(inchannel , 32 , kernel_size = 3 , padding = 1) , nn.SiLU(),
-            nn.Conv2d(32 , 32 , kernel_size = 3 , padding = 1) , nn.SiLU()
-        )
-
-        self.pool1 = nn.Conv2d(32 , 32 , kernel_size = 3 , stride = 2 , padding = 1)
-
-        self.enc2 = nn.Sequential(
-            nn.Conv2d(32 , 64 , kernel_size = 3 , padding = 1) , nn.SiLU() ,
-            nn.Conv2d(64 , 64 , kernel_size = 3 , padding = 1) , nn.SiLU()
-        )
-
-        self.pool2 = nn.Conv2d(64 , 64 , kernel_size = 3 , stride = 2 , padding = 1)
-
-        self.enc3 = nn.Sequential(
-            nn.Conv2d(64 , 128 , kernel_size = 3 , padding = 1) , nn.SiLU() ,
-            nn.Conv2d(128 , 128 , kernel_size = 3 , padding = 1) , nn.SiLU()
-        )
-
-        self.pool3 = nn.Conv2d(128 , 128 , kernel_size = 3 , stride = 2 , padding = 1)
-
-        self.mu = nn.Conv2d(128 , self.latent_dim , kernel_size = 1)
-        self.var = nn.Conv2d(128 , self.latent_dim , kernel_size = 1)
-
-
-        # decoder
-        self.up1 = nn.ConvTranspose2d(self.latent_dim , 128 , kernel_size = 1 , stride = 2)
+        def block(cin, cout):
+            return nn.Sequential(
+                nn.Conv2d(cin, cout, 3, padding=1),
+                nn.GroupNorm(8, cout),
+                nn.SiLU(),
+                nn.Conv2d(cout, cout, 3, padding=1),
+                nn.GroupNorm(8, cout),
+                nn.SiLU()
+            )
         
-        self.dec1 = nn.Sequential(
-            nn.Conv2d(128 , 128 , kernel_size = 3 , padding = 1) , nn.SiLU() ,
-            nn.Conv2d(128 , 128 , kernel_size = 3 , padding = 1) , nn.SiLU()
+        # ── Encoder ──────────────────────────────────────────
+        self.enc1 = block(inchannel, 128)
+        self.res1 = nn.Sequential(RESIDUAL(128, 128), RESIDUAL(128, 128))
+
+        self.pool1 = nn.Sequential(
+            nn.Conv2d(128, 128, 3, stride=2, padding=1),
+            RESIDUAL(128, 128),
+            nn.SiLU()
         )
 
-        self.up2 = nn.ConvTranspose2d(128 , 64 , kernel_size = 1 , stride = 2)
+        self.enc2 = block(128, 256)
+        self.res2 = nn.Sequential(RESIDUAL(256, 256), RESIDUAL(256, 256))
 
-        self.dec2 = nn.Sequential(
-            nn.Conv2d(64 , 64 , kernel_size = 3 , padding = 1) , nn.SiLU() ,
-            nn.Conv2d(64 , 64 , kernel_size = 3 , padding = 1) , nn.SiLU()
-        )       
+        self.pool2 = nn.Sequential(
+            nn.Conv2d(256, 256, 3, stride=2, padding=1),
+            RESIDUAL(256, 256),
+            nn.SiLU()
+        )
 
-        self.up3 = nn.ConvTranspose2d(64 , 32 , kernel_size = 1 , stride = 2)
+        self.enc3 = block(256, 512)
+        self.res3 = nn.Sequential(
+            RESIDUAL(512, 512),
+            RESIDUAL(512, 512),
+            RESIDUAL(512, 512)   # extra depth at bottleneck
+        )
 
-        self.dec3 = nn.Sequential(
-            nn.Conv2d(32 , 32 , kernel_size = 3 , padding = 1) , nn.SiLU() ,
-            nn.Conv2d(32 , 32 , kernel_size = 3 , padding = 1) , nn.SiLU()
-        )       
+        self.mu     = nn.Conv2d(512, latentdim, 1)
+        self.logvar = nn.Conv2d(512, latentdim, 1)
 
-        self.final = nn.Conv2d(32 , inchannel , kernel_size = 1)
-    
-    def reparametrize(self , mu , logvar):
-        return mu + torch.randn_like(mu) * torch.exp(0.5 * logvar)
-    
-    def decode(self , x):
-        d = self.dec1(self.up1(x))
-        d = self.dec2(self.up2(d))
-        d = self.dec3(self.up3(d))
+        # ── Decoder ──────────────────────────────────────────
+        self.res_latent = nn.Sequential(
+            RESIDUAL(latentdim, latentdim),
+            RESIDUAL(latentdim, latentdim)  # refine latent before decoding
+        )
 
-        out = self.final(d)
-        out = F.interpolate(out , size = (28 , 28) , mode = 'bilinear' , align_corners = False)
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(latentdim, 512, 2, stride=2),
+            RESIDUAL(512, 512),
+            nn.SiLU()
+        )
+        self.dec1 = block(512, 256)
+        self.res4 = nn.Sequential(RESIDUAL(256, 256), RESIDUAL(256, 256))
 
-        return torch.clamp(out , -15 , 15)
-    
-    
-    def forward(self , x):
-        d = self.pool1(self.enc1(x))
-        d = self.pool2(self.enc2(d))
-        d = self.pool3(self.enc3(d))
+        self.up2 = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, 2, stride=2),
+            RESIDUAL(128, 128),
+            nn.SiLU()
+        )
+        self.dec2 = block(128, 128)
+        self.res5 = nn.Sequential(RESIDUAL(128, 128), RESIDUAL(128, 128))
 
+        self.final = nn.Sequential(
+            nn.Conv2d(128, inchannel, 1),
+            nn.Tanh() 
+        )
 
-        mu = self.mu(d)
-        logvar = torch.clamp(self.var(d) , -4 , 2)
+    def reparametrize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
-        z = self.reparametrize(mu , logvar)
-        return self.decode(z) , mu , logvar
+    def encode(self, x):
+        x = self.res1(self.enc1(x))          # [B, 128, 32, 32]
+        x = self.res2(self.enc2(self.pool1(x)))  # [B, 256, 16, 16]
+        x = self.res3(self.enc3(self.pool2(x)))  # [B, 512,  8,  8]
+        return x
+
+    def decode(self, z):
+        z = self.res_latent(z)               # [B, latentdim, 8, 8]
+        z = self.res4(self.dec1(self.up1(z)))    # [B, 256, 16, 16]
+        z = self.res5(self.dec2(self.up2(z)))    # [B, 128, 32, 32]
+        return self.final(z)                
+
+    def forward(self, x):
+        b      = self.encode(x)
+        mu     = self.mu(b)
+        logvar = torch.clamp(self.logvar(b), -10, 10)
+        z      = self.reparametrize(mu, logvar)
+        recon  = self.decode(z)
+        return recon, mu, logvar
