@@ -11,4 +11,4 @@ Framework: PyTorch
 
 Architecture: VAE + U-Net + Transformers (Attention)
 
-Math: Forward Diffusion (Gaussian Noise) and Reverse DDPM Sampling
+Math: Forward Diffusion (Gaussian Noise) and Reverse DDPM Sampling , CFG , VAE from scratch 
