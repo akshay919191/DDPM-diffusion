@@ -162,6 +162,7 @@ class UNET(nn.Module):
         return final
     
     
+    
 
 def get_time_embedding(timesteps, embedding_dim, device=None):
 
