@@ -1,4 +1,4 @@
-Latent Diffusion from Scratch (MNIST)
+Latent Diffusion from Scratch
 A "from-scratch" implementation of a Latent Diffusion Model (LDM). This project compresses images into a latent manifold using a VAE and then performs generative denoising using a U-Net with Multi-Head Self-Attention.
 
 
